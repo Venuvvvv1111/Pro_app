@@ -7,7 +7,10 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
-
+import 'dart:convert';
+import 'dart:typed_data';
+import 'package:path_provider/path_provider.dart';
+import 'package:open_file/open_file.dart';
 class WebViewPage extends StatefulWidget {
   WebViewPage({super.key});
 
@@ -53,11 +56,49 @@ class _WebViewPageState extends State<WebViewPage> {
     // Add JavaScript channel to listen for SPA route changes
     controller.addJavaScriptChannel(
       'Flutter',
-      onMessageReceived: (message) {
+      onMessageReceived: (message) async {
         final url = message.message;
-        debugPrint("SPA URL changed: $url");
-        widget.isLoginPageNotifier.value =
-            url.contains('/login') || url.contains('/register');
+            debugPrint("JS URL: $url");
+ final data = message.message;
+    // PDF
+     if (data.startsWith('data:application/pdf;base64,')) {
+    try {
+      final base64String =
+          data.replaceFirst('data:application/pdf;base64,', '');
+
+      final Uint8List bytes = base64Decode(base64String);
+
+      final dir = await getApplicationDocumentsDirectory();
+
+      final file = File(
+        '${dir.path}/Projexino_${DateTime.now().millisecondsSinceEpoch}.pdf',
+      );
+
+      await file.writeAsBytes(bytes);
+
+      debugPrint('PDF SAVED => ${file.path}');
+
+      await OpenFile.open(file.path);
+
+      return;
+    } catch (e) {
+      debugPrint('PDF ERROR => $e');
+    }
+  }
+
+
+
+        final match = RegExp(r'place_id:([^&]+)').firstMatch(url);
+
+        if (match != null) {
+          final placeId = match.group(1)!;
+
+          final googleMapsUri = Uri.parse(
+            'https://www.google.com/maps/search/?api=1&query_place_id=$placeId&query=location',
+          );
+
+          await launchUrl(googleMapsUri, mode: LaunchMode.externalApplication);
+        }
       },
     );
 
@@ -68,20 +109,66 @@ class _WebViewPageState extends State<WebViewPage> {
           onNavigationRequest: (NavigationRequest request) async {
             debugPrint("URL => ${request.url}");
 
-            // PDF detection
-            if (request.url.contains(".pdf")) {
-              final Uri url = Uri.parse(request.url);
+            final url = request.url;
 
-              await launchUrl(url, mode: LaunchMode.externalApplication);
+            // Open Google Maps externally
+            if (url.contains('google.com/maps') ||
+                url.contains('maps.google.com') ||
+                url.startsWith('geo:')) {
+              final uri = Uri.parse(url);
+
+              if (await canLaunchUrl(uri)) {
+                await launchUrl(uri, mode: LaunchMode.externalApplication);
+              }
 
               return NavigationDecision.prevent;
             }
 
+            // PDF detection
+           if (request.url.startsWith('blob:')) {
+  debugPrint('BLOB URL => ${request.url}');
+
+  await _controller.runJavaScript('''
+    (async function() {
+      const response = await fetch("${request.url}");
+      const blob = await response.blob();
+
+      const reader = new FileReader();
+
+      reader.onloadend = function() {
+        Flutter.postMessage(reader.result);
+      };
+
+      reader.readAsDataURL(blob);
+    })();
+  ''');
+
+  return NavigationDecision.prevent;
+}
+
             return NavigationDecision.navigate;
           },
 
-
           onProgress: (progress) => debugPrint('Loading: $progress%'),
+          onPageFinished: (url) async {
+  await controller.runJavaScript('''
+    document.addEventListener('click', function(e) {
+
+      const pdfBtn = e.target.closest('[data-testid="download-pdf-btn"]');
+      if (pdfBtn) {
+        Flutter.postMessage('PDF_DOWNLOAD_CLICKED');
+      }
+
+      const originalOpen = window.open;
+      window.open = function(url, target, features) {
+        if (url) {
+          Flutter.postMessage(url);
+        }
+        return originalOpen ? originalOpen(url, target, features) : null;
+      };
+    }, true);
+  ''');
+},
         ),
       )
       ..loadRequest(Uri.parse('https://projexino.com/login'));
@@ -97,17 +184,12 @@ class _WebViewPageState extends State<WebViewPage> {
     }
 
     _controller = controller;
-      requestPermissions();
+    requestPermissions();
   }
 
-Future<void> requestPermissions() async {
-
-  await [
-    Permission.location,
-    Permission.storage,
-  ].request();
-
-}
+  Future<void> requestPermissions() async {
+    await [Permission.location, Permission.storage].request();
+  }
   @override
   Widget build(BuildContext context) {
     return WillPopScope(
